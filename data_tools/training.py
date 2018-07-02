@@ -287,7 +287,7 @@ def _fill_results(result_dict, results_to_add, iteration=0):
             )
     for key, result in results_to_add.items():
         if key not in result_dict:
-            raise KeyError('Key {} not found in expected results.')
+            raise KeyError('Key {} not found in expected results.'.format(key))
         if has_iterations:
             result_dict[key][iteration] = result
         else:
