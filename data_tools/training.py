@@ -262,7 +262,7 @@ def _build_results(val, test, iterations=1):
     return val_results, test_results
 
 
-def _fill_results(result_dict, results_to_add, iteration=1):
+def _fill_results(result_dict, results_to_add, iteration=0):
     """Fill the results for a given iteration.
 
     This does in-place modification.
@@ -277,7 +277,7 @@ def _fill_results(result_dict, results_to_add, iteration=1):
         raise AssertionError(
             'Result dictionary needs to be prepared prior to filling.'
         )
-    has_iterations = len(values[0].shape) == 3
+    has_iterations = iteration >= 0
     if has_iterations:
         total_iterations = values[0].shape[0]
         if iteration >= total_iterations:
@@ -287,7 +287,7 @@ def _fill_results(result_dict, results_to_add, iteration=1):
             )
     for key, result in results_to_add.items():
         if key not in result_dict:
-            raise KeyError('Key {} not found i n expected results.')
+            raise KeyError('Key {} not found in expected results.')
         if has_iterations:
             result_dict[key][iteration] = result
         else:
