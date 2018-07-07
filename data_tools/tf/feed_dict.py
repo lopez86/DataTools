@@ -1,4 +1,17 @@
+import funcy
 import numpy as np
+
+
+def make_simple_feed_builder(
+    istrain_str='is_train',
+    sparse=None
+):
+    builder = funcy.partial(
+        simple_feed_builder,
+        istrain_str=istrain_str,
+        sparse=sparse
+    )
+    return builder
 
 
 def simple_feed_builder(
