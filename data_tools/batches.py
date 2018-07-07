@@ -44,6 +44,10 @@ def generate_batches(data,
         else:
             perm = np.arange(size)
         for b in range(batches_per_epoch):
+            if verbose > 1:
+                if (int(b / batches_per_epoch * 100) >
+                        int((b - 1) / batches_per_epoch * 100)):
+                    print('{}% done'.format(int(b / batches_per_epoch * 100)), end='\r')
             indices = perm[b * batch_size: (b + 1) * batch_size]
             batch_inputs = split_data_dict(data.inputs, indices)
             batch_outputs = split_data_dict(data.outputs, indices)
@@ -54,6 +58,7 @@ def generate_batches(data,
             batch = BatchData(
                 batch_inputs,
                 outputs=batch_outputs,
+                index=indices,
                 epoch=epoch,
                 batch=b,
                 epoch_done=epoch_done,

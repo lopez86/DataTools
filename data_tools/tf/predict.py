@@ -1,13 +1,12 @@
+import funcy
 import numpy as np
 import tensorflow as tf
 
 from .feed_dict import simple_feed_builder
 from ..batches import generate_batches
 from ..data_types import Results
+from ..util import get_number_of_samples
 
-
-# This is in the form {tf.Graph variable name: greater_loss_is_better}
-DEFAULT_LOSS_DICT = {'output/loss': False}
 # This is in the form {output variable name: tf graph variable name}
 DEFAULT_PRED_DICT = {'y': 'output/predictions'}
 
@@ -20,9 +19,10 @@ def train_model_with_stopping(
     test_data=None,
     feed_builder=simple_feed_builder,
     batch_generator=generate_batches,
+    predict_batch_generator=None,
     n_stop=-1,
     verbose=1,
-    losses=DEFAULT_LOSS_DICT,
+    losses=None,
     train_str='output/training',
     pred_dict=DEFAULT_PRED_DICT
 ):
@@ -48,11 +48,12 @@ def train_model_with_stopping(
         test_data: maybe(Dataset) instance
         feed_builder: callable, creates a feed dict
         batch_generator: callable, generates batches
+        predict_batch_generator: maybe(callable), an alternative batch generator
+                                 for predictions on the test & validation sets
         n_stop: int, number of epochs with no improvement before stopping.
                 If 0 or negative, the stopping is disabled.
         verbose: int, verbosity level
-        losses: dict of str -> bool, keys are loss functions to check, values give
-                whether the function is better at higher values or not.
+        losses: list of Loss tuples
         train_str: str, the training operation for the graph
         pred_dict: dict of str -> str, gives the mapping of output variable name to
                    tensorflow graph variable name.
@@ -62,12 +63,13 @@ def train_model_with_stopping(
         Results instance with predictions on any validation or test data.
     """
     best_scores, best_epochs = _initialize_stopping(losses)
+    if predict_batch_generator is None:
+        predict_batch_generator = batch_generator
 
     train, val, test, features = preprocessor(
         train_data, val_data, test_data
     )
     model = model_builder(train, val, test, features)
-    val_feed_dict = feed_builder(val, False)
 
     with tf.Session(graph=model) as sess:
         tf.global_variables_initializer().run()
@@ -76,13 +78,13 @@ def train_model_with_stopping(
             train_feed_dict = feed_builder(batch, True)
 
             sess.run(train_str, feed_dict=train_feed_dict)
-            if batch.epoch_done and val_feed_dict is not None:
+            if batch.epoch_done and losses is not None and val is not None:
 
                 if verbose == 0 and n_stop <= 0:
                     continue
 
                 scores = _get_validation_losses(
-                    sess, losses.keys(), val_feed_dict, verbose
+                    sess, val, losses, predict_batch_generator, feed_builder, verbose
                 )
 
                 best_epochs, best_scores, stop_training = _check_early_stopping(
@@ -94,16 +96,30 @@ def train_model_with_stopping(
                         print('Stopping training at epoch {}'.format(batch.epoch))
                     break
 
-        val_preds = _run_predictions(sess, pred_dict, data=val, feed_dict=val_feed_dict)
+        if verbose > 0 and val is not None:
+            print('Making validation set predictions')
+        val_preds = _run_predictions(
+            sess,
+            pred_dict,
+            data=val,
+            batch_generator=predict_batch_generator,
+            feed_builder=feed_builder
+        )
+        if verbose > 0 and test is not None:
+            print('Making test set predictions')
         test_preds = _run_predictions(
-            sess, pred_dict, data=test, feed_builder=feed_builder
+            sess,
+            pred_dict,
+            data=test,
+            batch_generator=predict_batch_generator,
+            feed_builder=feed_builder
         )
 
         results = Results(validation=val_preds, test=test_preds)
         return results
 
 
-def _run_predictions(sess, pred_dict, feed_dict=None, data=None, feed_builder=None):
+def _run_predictions(sess, pred_dict, data, batch_generator, feed_builder):
     """With the current active session, make predictions from a given dataset.
 
     A feed dict may be passed directly into this function but otherwise, a Dataset
@@ -111,11 +127,11 @@ def _run_predictions(sess, pred_dict, feed_dict=None, data=None, feed_builder=No
 
     Args:
         sess: tensorflow.Session instance
-        pred_dict: dict of str -> str. Maps the output variable name of each
-                   field to predict to the tensorflow variable name in the graph.
-        feed_dict: maybe(dict), tensorflow feed dict.
-        data: maybe(Dataset), if no feed dict this must be set
-        feed_builder: maybe(callable), if no feed dict this must be set
+        pred_dict: dict of str -> str, gives the mapping of output variable name to
+                   tensorflow graph variable name.
+        data: Dataset
+        batch_generator: callable
+        feed_builder: callable
 
     Returns:
         dict of str to numpy.ndarray giving a mapping of output field name
@@ -123,30 +139,73 @@ def _run_predictions(sess, pred_dict, feed_dict=None, data=None, feed_builder=No
     """
     if data is None:
         return None
-    if feed_dict is None and (data is None or feed_builder is None):
-        raise AssertionError(
-            'A feed dict or some data and a feed builder is needed to make predictions.'
-        )
-    if feed_dict is None:
-        feed_dict = feed_builder(data, False)
-    pred_names = [pred + ':0' for pred in pred_dict.values()]
 
-    preds = sess.run(pred_names, feed_dict=feed_dict)
+    n_total = get_number_of_samples(data)
+    # Get the tensor names to be sent to tensorflow
+    pred_names = [pred + ':0' for pred in pred_dict.values()]
+    # Get the correct output shapes
+    pred_shapes = [
+        tf.get_default_graph().get_tensor_by_name(pred_name).get_shape().as_list()
+        for pred_name in pred_names
+    ]
+    for pred_shape in pred_shapes:
+        pred_shape[0] = n_total
+    # Get the output labels and build the output arrays
     pred_labels = [label for label in pred_dict.keys()]
     output_dict = {
-        label: label_preds for label, label_preds in zip(pred_labels, preds)
+        label: np.zeros(shape, dtype=np.float32)
+        for label, shape in zip(pred_labels, pred_shapes)
     }
+
+    # Loop through batches
+    for batch in batch_generator(data):
+        feed_dict = feed_builder(batch, False)
+        preds = sess.run(pred_names, feed_dict=feed_dict)
+        for label, pred in zip(pred_labels, preds):
+            output_dict[label][batch.index] = pred
+        if batch.epoch_done:
+            break
+
     return output_dict
 
 
-def _get_validation_losses(sess, loss_names, val_feed_dict, verbose):
-    loss_tensor_names = [loss_name + ':0' for loss_name in loss_names]
-    losses = sess.run(loss_tensor_names, feed_dict=val_feed_dict)
+def _get_validation_losses(
+        sess,
+        data,
+        losses,
+        batch_generator,
+        feed_builder,
+        verbose):
+    """Calculate losses for a given dataset.
+
+    Args:
+        sess: tensorflow.Session
+        data: Dataset instance
+        losses: list of Loss tuples
+        batch_generator: callable
+        feed_builder: callable
+        verbose: int
+
+    Returns:
+        dict of str -> float
+    """
+    loss_tensor_names = funcy.ldistinct([loss.tensor for loss in losses])
+    tensor_dict = {name: name for name in loss_tensor_names}
+    result_dict = _run_predictions(
+        sess, tensor_dict, data, batch_generator, feed_builder
+    )
+
+    loss_dict = {
+        loss.name: loss.function(
+            data.outputs[loss.field], result_dict[loss.tensor]
+        )
+        for loss in losses
+    }
+
     if verbose > 0:
         print('Validation Scores:')
-        for loss_name, loss in zip(loss_names, losses):
+        for loss_name, loss in loss_dict.items():
             print('{}: {:0.5}'.format(loss_name, loss))
-    loss_dict = dict(zip(loss_names, losses))
     return loss_dict
 
 
@@ -157,8 +216,7 @@ def _check_early_stopping(losses, scores, best_epochs, best_scores, current_epoc
     a set number of epochs.
 
     Args:
-        losses: dict of str -> bool, keys are the loss functions, values
-                are true if a greater loss value is better otherwise false.
+        losses: list of Loss tuples
         scores: dict of str -> float, keys are the loss function names, values
                 are the current values of these losses.
         best_epochs: dict of str -> int, keys are the loss functions
@@ -178,19 +236,20 @@ def _check_early_stopping(losses, scores, best_epochs, best_scores, current_epoc
     updated_epochs = {}
     updated_scores = {}
     stop_training = False
-    for key in losses:
-        greater_is_better = losses[key]
-        new_score = scores[key]
-        best_epoch = best_epochs[key]
-        best_score = best_scores[key]
+    for loss in losses:
+        loss_name = loss.name
+        greater_is_better = loss.greater_is_better
+        new_score = scores[loss_name]
+        best_epoch = best_epochs[loss_name]
+        best_score = best_scores[loss_name]
 
         if ((greater_is_better and (new_score > best_score)) or
                 ((not greater_is_better) and (new_score < best_score))):
-            updated_epochs[key] = current_epoch
-            updated_scores[key] = new_score
+            updated_epochs[loss_name] = current_epoch
+            updated_scores[loss_name] = new_score
         else:
-            updated_epochs[key] = best_epoch
-            updated_scores[key] = best_score
+            updated_epochs[loss_name] = best_epoch
+            updated_scores[loss_name] = best_score
             if current_epoch - best_epoch > n_stop:
                 stop_training = True
 
@@ -200,13 +259,8 @@ def _check_early_stopping(losses, scores, best_epochs, best_scores, current_epoc
 def _initialize_stopping(losses):
     """Initialize early stopping variables for a set of losses/scores.
 
-    Tne losses should be given as a dict where the keys are the
-    Tensorflow variable names and the values are booleans.
-    The values should be true if we want to optimize for greater
-    values of a variable and false if we want to optimize for lower values.
-
     Args:
-        losses: dict of str -> bool.
+        losses: list of Loss tuples.
 
     Returns:
         2-tuple giving:
@@ -216,8 +270,8 @@ def _initialize_stopping(losses):
                      are the epochs with the best score for that loss.
     """
     best_losses = {
-        loss: (2 * greater_is_better - 1) * np.inf
-        for loss, greater_is_better in losses.items()
+        loss.name: (2 * loss.greater_is_better - 1) * np.inf
+        for loss in losses
     }
-    best_epochs = {loss: 0 for loss in losses.keys()}
+    best_epochs = {loss.name: 0 for loss in losses}
     return best_losses, best_epochs

@@ -1,5 +1,5 @@
 """Defines basic data types."""
-
+from collections import namedtuple
 
 class Dataset:
     """Base Dataset class."""
@@ -54,6 +54,7 @@ class BatchData(Dataset):
             self,
             inputs,
             outputs=None,
+            index=None,
             epoch=0,
             epoch_done=False,
             batch=0,
@@ -67,12 +68,14 @@ class BatchData(Dataset):
         Args:
             inputs: dict of str to array-like
             outputs: dict of str to array-like
+            index: array-like
             epoch: int, the current epoch
             epoch_done: bool, True if the last batch of the current epoch
             batch: int, the index of the current batch in the current epoch
             metadata: dict
         """
         super(BatchData, self).__init__(inputs, outputs, metadata)
+        self._index = index
         self._batch = batch
         self._epoch = epoch
         self._epoch_done = epoch_done
@@ -92,6 +95,10 @@ class BatchData(Dataset):
         """Get whether or not this is the end of the current epoch."""
         return self._epoch_done
 
+    @property
+    def index(self):
+        """Get the list of indices in this batch."""
+        return self._index
 
 class Results:
     """Container for prediction results."""
@@ -148,3 +155,5 @@ class KFoldResults(Results):
     def train_folds(self):
         """Get where each of the training samples was in the out of fold sample."""
         return self._folds
+
+Loss = namedtuple('Loss', ['name', 'field', 'tensor', 'function', 'greater_is_better'])
