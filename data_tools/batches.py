@@ -79,7 +79,9 @@ def generate_batches(data,
             batch_outputs = split_data_dict(data.outputs, indices)
 
             if ((batches_per_group <= 0 and b == batches_per_epoch - 1)
-                or (batches_per_group > 0 and batch_counter % batches_per_group == 0)):
+                    or (batches_per_group > 0 and batch_counter % batches_per_group == 0)):
+                epoch_done = True
+            elif b == batches_per_epoch - 1 and epoch == n_epochs - 1:
                 epoch_done = True
 
             batch = BatchData(

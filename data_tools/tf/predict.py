@@ -1,3 +1,6 @@
+import glob
+import os
+
 import funcy
 import numpy as np
 import tensorflow as tf
@@ -24,7 +27,8 @@ def train_model_with_stopping(
     verbose=1,
     losses=None,
     train_str='output/training',
-    pred_dict=DEFAULT_PRED_DICT
+    pred_dict=DEFAULT_PRED_DICT,
+    model_file=None
 ):
     """Train a Tensorflow model with rudimentary early stopping.
 
@@ -57,6 +61,7 @@ def train_model_with_stopping(
         train_str: str, the training operation for the graph
         pred_dict: dict of str -> str, gives the mapping of output variable name to
                    tensorflow graph variable name.
+        model_file: maybe(str or callable)
 
 
     Returns:
@@ -71,9 +76,23 @@ def train_model_with_stopping(
     )
     model = model_builder(train, val, test, features)
 
+    if model_file is None:
+        output_file = None
+    elif isinstance(model_file, str):
+        output_file = model_file
+    elif callable(model_file):
+        output_file = model_file()
+    else:
+        raise TypeError('model_file must be None, str, or callable.')
+
     with tf.Session(graph=model) as sess:
+        if output_file is None:
+            saver = None
+        else:
+            saver = tf.train.Saver()
         tf.global_variables_initializer().run()
 
+        stop_test_counter = 0
         for batch in batch_generator(train):
             train_feed_dict = feed_builder(batch, True)
 
@@ -87,14 +106,22 @@ def train_model_with_stopping(
                     sess, val, losses, predict_batch_generator, feed_builder, verbose
                 )
 
-                best_epochs, best_scores, stop_training = _check_early_stopping(
-                    losses, scores, best_epochs, best_scores, batch.epoch, n_stop
+                (
+                    best_epochs, best_scores, is_updated, stop_training
+                ) = _check_early_stopping(
+                    losses, scores, best_epochs, best_scores, stop_test_counter, n_stop
                 )
+
+                _save_models(sess, saver, output_file, is_updated)
 
                 if stop_training:
                     if verbose > 0:
                         print('Stopping training at epoch {}'.format(batch.epoch))
                     break
+
+                stop_test_counter += 1
+
+        _restore_model(sess, saver, output_file, best_epochs)
 
         if verbose > 0 and val is not None:
             print('Making validation set predictions')
@@ -115,8 +142,8 @@ def train_model_with_stopping(
             feed_builder=feed_builder
         )
 
-        results = Results(validation=val_preds, test=test_preds)
-        return results
+    results = Results(validation=val_preds, test=test_preds)
+    return results
 
 
 def _run_predictions(sess, pred_dict, data, batch_generator, feed_builder):
@@ -228,6 +255,7 @@ def _check_early_stopping(losses, scores, best_epochs, best_scores, current_epoc
         3-tuple:
         updated_epochs: best_epochs after updating for this stopping round
         updated_scores: best_scores after updating for this stopping round
+        is_updated: list of str, the losses that were updated
         stop_training: bool, True if training should be stopped at this point
     """
     if n_stop <= 0:
@@ -236,6 +264,7 @@ def _check_early_stopping(losses, scores, best_epochs, best_scores, current_epoc
     updated_epochs = {}
     updated_scores = {}
     stop_training = False
+    is_updated = []
     for loss in losses:
         loss_name = loss.name
         greater_is_better = loss.greater_is_better
@@ -243,17 +272,18 @@ def _check_early_stopping(losses, scores, best_epochs, best_scores, current_epoc
         best_epoch = best_epochs[loss_name]
         best_score = best_scores[loss_name]
 
-        if ((greater_is_better and (new_score > best_score)) or
-                ((not greater_is_better) and (new_score < best_score))):
+        if (((greater_is_better is True) and (new_score > best_score)) or
+                ((greater_is_better is False) and (new_score < best_score))):
             updated_epochs[loss_name] = current_epoch
             updated_scores[loss_name] = new_score
+            is_updated.append(loss_name)
         else:
             updated_epochs[loss_name] = best_epoch
             updated_scores[loss_name] = best_score
-            if current_epoch - best_epoch > n_stop:
+            if current_epoch - best_epoch >= n_stop:
                 stop_training = True
 
-    return updated_epochs, updated_scores, stop_training
+    return updated_epochs, updated_scores, is_updated, stop_training
 
 
 def _initialize_stopping(losses):
@@ -270,8 +300,58 @@ def _initialize_stopping(losses):
                      are the epochs with the best score for that loss.
     """
     best_losses = {
-        loss.name: (2 * loss.greater_is_better - 1) * np.inf
+        loss.name: (1 - 2 * loss.greater_is_better) * np.inf
         for loss in losses
     }
     best_epochs = {loss.name: 0 for loss in losses}
     return best_losses, best_epochs
+
+
+def _restore_model(
+        sess,
+        saver,
+        output_file,
+        best_epochs,
+):
+    """Restore and clean up models.
+
+    Args:
+        sess: tensorflow Session instance
+        saver: tensorflow Saver instance
+        output_file: str, the output file path
+        best_epochs: dict, str -> int
+    """
+    if output_file is None:
+        return
+
+    model_to_restore = min(
+        list(best_epochs.items()),
+        key=lambda x: x[1]
+    )[0]
+
+    restore_file = output_file + '_' + model_to_restore
+    saver.restore(sess, restore_file)
+    saver.save(sess, output_file)
+    for loss in best_epochs.keys():
+        file_path = output_file + '_' + loss
+        files = glob.glob(file_path + '*')
+        for file in files:
+            os.remove(file)
+
+
+def _save_models(sess, saver, output_file, is_updated):
+    """
+
+    Args:
+        sess: tensorflow Session instance
+        saver: tensorflow Saver instance
+        output_file: str, the name of the expected output file
+        is_updated: list of str, models to update
+    """
+    if output_file is None:
+        return
+    for loss in is_updated:
+        saver.save(
+            sess,
+            output_file + '_' + loss
+        )
